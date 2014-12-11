@@ -10,7 +10,8 @@ import java.util.Map;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
-import org.apache.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.ImmutableMap;
 
@@ -27,7 +28,7 @@ import backtype.storm.utils.Utils;
  *
  */
 public class PartitionConsumer {
-    private static Logger LOG = Logger.getLogger(PartitionConsumer.class);
+    private static Logger LOG = LoggerFactory.getLogger(PartitionConsumer.class);
 
     static enum EmitState {
         EMIT_MORE, EMIT_END, EMIT_NONE
@@ -96,7 +97,7 @@ public class PartitionConsumer {
 
             if (tups != null) {
                 for (List<Object> tuple : tups) {
-                    LOG.debug("emit message " + new String(Utils.toByteArray(toEmitMsg.message().payload())));
+                    LOG.debug("emit message {}", new String(Utils.toByteArray(toEmitMsg.message().payload())));
                     collector.emit(tuple, new KafkaMessageId(partition, toEmitMsg.offset()));
                 }
                 break;
@@ -119,16 +120,19 @@ public class PartitionConsumer {
             msgs = consumer.fetchMessages(partition, emittingOffset + 1);
             
             if (msgs == null) {
-                LOG.error("fetch null message from offset " + emittingOffset);
+                LOG.error("fetch null message from offset {}", emittingOffset);
                 return;
             }
-            LOG.info("fetch message from offset " + emittingOffset+", size:"+msgs.sizeInBytes());
+            
+            int count = 0;
             for (MessageAndOffset msg : msgs) {
+                count += 1;
                 emittingMessages.add(msg);
                 emittingOffset = msg.offset();
                 pendingOffsets.add(emittingOffset);
-                LOG.debug("===== fetched a message: " + msg.message().toString() + " offset:" + msg.offset());
+                LOG.debug("fillmessage fetched a message:{}, offset:{}", msg.message().toString(), msg.offset());
             }
+            LOG.info("fetch message from partition:"+partition+", offset:" + emittingOffset+", size:"+msgs.sizeInBytes()+", count:"+count);
         } catch (Exception e) {
             e.printStackTrace();
             LOG.error(e.getMessage(),e);

@@ -21,14 +21,13 @@ public class PartitionCoordinator {
 	}
 
 	private void createPartitionConsumers(Map conf, TopologyContext context) {
-		partitionConsumerMap = new HashMap<Integer, PartitionConsumer>();
-
-		for(int i=0; i<config.numPartitions; i++) {
-		    PartitionConsumer partitionConsumer = new PartitionConsumer(conf, config, i, zkState);
-		    partitionConsumers.add(partitionConsumer);
-		    partitionConsumerMap.put(i, partitionConsumer);
-		}
-		
+	    partitionConsumerMap = new HashMap<Integer, PartitionConsumer>();
+        int taskSize = context.getComponentTasks(context.getThisComponentId()).size();
+        for(int i=context.getThisTaskIndex(); i<config.numPartitions; i+=taskSize) {
+            PartitionConsumer partitionConsumer = new PartitionConsumer(conf, config, i, zkState);
+            partitionConsumers.add(partitionConsumer);
+            partitionConsumerMap.put(i, partitionConsumer);
+        }
 	}
 
 	public List<PartitionConsumer> getPartitionConsumers() {
