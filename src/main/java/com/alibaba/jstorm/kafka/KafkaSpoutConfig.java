@@ -33,9 +33,10 @@ public class KafkaSpoutConfig implements Serializable {
     public boolean fromBeginning = false;
     public String clientId;
     public boolean resetOffsetIfOutOfRange = false;
-    public long stateUpdateIntervalMs=2000;
+    public long offsetUpdateIntervalMs=2000;
     private Properties properties = null;
     private Map stormConf;
+    public int batchSendCount = 1;
     
     public KafkaSpoutConfig() {
     }
@@ -61,7 +62,9 @@ public class KafkaSpoutConfig implements Serializable {
         socketReceiveBufferBytes = JStormUtils.parseInt(getConfig("kafka.socket.receive.buffer.bytes"), 64*1024);
         fromBeginning = JStormUtils.parseBoolean(getConfig("kafka.fetch.from.beginning"), false);
         startOffsetTime = JStormUtils.parseInt(getConfig("kafka.start.offset.time"), -1);
+        offsetUpdateIntervalMs = JStormUtils.parseInt(getConfig("kafka.offset.update.interval.ms"), 2000);
         clientId = getConfig("kafka.client.id", "jstorm");
+        batchSendCount = JStormUtils.parseInt(getConfig("kafka.spout.batch.send.count"), 1);
     }
     
     

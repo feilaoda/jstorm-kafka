@@ -80,7 +80,7 @@ public class KafkaSpout implements IRichSpout {
 //			}
 		}
 		long now = System.currentTimeMillis();
-        if((now - lastUpdateMs) > config.stateUpdateIntervalMs) {
+        if((now - lastUpdateMs) > config.offsetUpdateIntervalMs) {
             commitState();
         }
         

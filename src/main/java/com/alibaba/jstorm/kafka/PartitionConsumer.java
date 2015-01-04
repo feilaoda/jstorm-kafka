@@ -69,10 +69,10 @@ public class PartitionConsumer {
 
         try {
             if (config.fromBeginning) {
-                emittingOffset = consumer.getOffset(config.topic, partition, config.startOffsetTime);
+                emittingOffset = consumer.getOffset(config.topic, partition, kafka.api.OffsetRequest.EarliestTime());
             } else {
                 if (jsonOffset == null) {
-                    lastCommittedOffset = consumer.getOffset(config.topic, partition, -1);
+                    lastCommittedOffset = consumer.getOffset(config.topic, partition, kafka.api.OffsetRequest.LatestTime());
                 } else {
                     lastCommittedOffset = jsonOffset;
                 }
@@ -88,11 +88,13 @@ public class PartitionConsumer {
             fillMessages();
         }
 
+        int count = 0;
         while (true) {
             MessageAndOffset toEmitMsg = emittingMessages.pollFirst();
             if (toEmitMsg == null) {
                 return EmitState.EMIT_END;
             }
+            count ++;
             Iterable<List<Object>> tups = generateTuples(toEmitMsg.message());
 
             if (tups != null) {
@@ -100,7 +102,9 @@ public class PartitionConsumer {
                     LOG.debug("emit message {}", new String(Utils.toByteArray(toEmitMsg.message().payload())));
                     collector.emit(tuple, new KafkaMessageId(partition, toEmitMsg.offset()));
                 }
-                break;
+                if(count>=config.batchSendCount) {
+                    break;
+                }
             } else {
                 ack(toEmitMsg.offset());
             }
@@ -117,6 +121,7 @@ public class PartitionConsumer {
 
         ByteBufferMessageSet msgs;
         try {
+            long start = System.currentTimeMillis();
             msgs = consumer.fetchMessages(partition, emittingOffset + 1);
             
             if (msgs == null) {
@@ -132,7 +137,8 @@ public class PartitionConsumer {
                 pendingOffsets.add(emittingOffset);
                 LOG.debug("fillmessage fetched a message:{}, offset:{}", msg.message().toString(), msg.offset());
             }
-            LOG.info("fetch message from partition:"+partition+", offset:" + emittingOffset+", size:"+msgs.sizeInBytes()+", count:"+count);
+            long end = System.currentTimeMillis();
+            LOG.info("fetch message from partition:"+partition+", offset:" + emittingOffset+", size:"+msgs.sizeInBytes()+", count:"+count +", time:"+(end-start));
         } catch (Exception e) {
             e.printStackTrace();
             LOG.error(e.getMessage(),e);

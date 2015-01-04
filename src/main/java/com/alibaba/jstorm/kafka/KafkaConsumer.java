@@ -58,20 +58,25 @@ public class KafkaConsumer {
         FetchRequest req = new FetchRequestBuilder().clientId(config.clientId).addFetch(topic, partition, offset, config.fetchMaxBytes)
                 .maxWait(config.fetchWaitMaxMs).build();
         FetchResponse fetchResponse = null;
+        SimpleConsumer simpleConsumer = null;
         try {
-            if (consumer == null) {
-                consumer = findLeaderConsumer(partition);
-            }
-            if (consumer == null) {
+            simpleConsumer = findLeaderConsumer(partition);
+            if (simpleConsumer == null) {
                 // LOG.error(message);
                 return null;
             }
-            fetchResponse = consumer.fetch(req);
+            fetchResponse = simpleConsumer.fetch(req);
         } catch (Exception e) {
             if (e instanceof ConnectException || e instanceof SocketTimeoutException || e instanceof IOException
                     || e instanceof UnresolvedAddressException) {
                 LOG.warn("Network error when fetching messages:", e);
-                throw new KafkaException("Network error when fetching messages: " + e.getMessage());
+                if (simpleConsumer != null) {
+                    String host = simpleConsumer.host();
+                    int port = simpleConsumer.port();
+                    simpleConsumer = null;
+                    throw new KafkaException("Network error when fetching messages: " + host + ":" + port + " , " + e.getMessage(), e);
+                }
+
             } else {
                 throw new RuntimeException(e);
             }
@@ -82,8 +87,12 @@ public class KafkaConsumer {
                 long startOffset = getOffset(topic, partition, config.startOffsetTime);
                 offset = startOffset;
             }
-            LOG.error("fetch data from kafka topic[" + config.topic + "] host[" + leaderBroker.host() + ":" + leaderBroker.port() + "] partition["
+            if(leaderBroker != null) {
+                LOG.error("fetch data from kafka topic[" + config.topic + "] host[" + leaderBroker.host() + ":" + leaderBroker.port() + "] partition["
                     + partition + "] error:" + code);
+            }else {
+                
+            }
             return null;
         } else {
             ByteBufferMessageSet msgs = fetchResponse.messageSet(topic, partition);
@@ -92,29 +101,49 @@ public class KafkaConsumer {
     }
 
     private SimpleConsumer findLeaderConsumer(int partition) {
-        PartitionMetadata metadata = findLeader(partition);
-        if (metadata == null) {
-            leaderBroker = null;
-            consumer = null;
-            return null;
-        }
-        leaderBroker = metadata.leader();
-        consumer = new SimpleConsumer(leaderBroker.host(), leaderBroker.port(), config.socketTimeoutMs, config.socketReceiveBufferBytes,
-                config.clientId);
+        try {
+            if (consumer != null) {
+                return consumer;
+            }
+            PartitionMetadata metadata = findLeader(partition);
+            if (metadata == null) {
+                leaderBroker = null;
+                consumer = null;
+                return null;
+            }
+            leaderBroker = metadata.leader();
+            consumer = new SimpleConsumer(leaderBroker.host(), leaderBroker.port(), config.socketTimeoutMs, config.socketReceiveBufferBytes,
+                    config.clientId);
 
-        return consumer;
+            return consumer;
+        } catch (Exception e) {
+            LOG.error(e.getMessage(), e);
+        }
+        return null;
     }
 
     protected PartitionMetadata findLeader(int partition) {
         PartitionMetadata returnMetaData = null;
         int errors = 0;
         int size = brokerList.size();
+
+        Host brokerHost = brokerList.get(brokerIndex);
+        try {
+            if (consumer == null) {
+                consumer = new SimpleConsumer(brokerHost.getHost(), brokerHost.getPort(), config.socketTimeoutMs, config.socketReceiveBufferBytes,
+                        config.clientId);
+            }
+        } catch (Exception e) {
+            LOG.warn(e.getMessage(), e);
+            consumer = null;
+        }
         int i = brokerIndex;
         loop: while (i < size && errors < size + 1) {
-            SimpleConsumer consumer = null;
             Host host = brokerList.get(i);
-            i = (i+1)%size;
+            i = (i + 1) % size;
+            brokerIndex = i; // next index
             try {
+
                 if (consumer == null) {
                     consumer = new SimpleConsumer(host.getHost(), host.getPort(), config.socketTimeoutMs, config.socketReceiveBufferBytes,
                             config.clientId);
@@ -126,6 +155,7 @@ public class KafkaConsumer {
                     resp = consumer.send(req);
                 } catch (Exception e) {
                     errors += 1;
+
                     LOG.error("findLeader error, broker:" + host.toString() + ", will change to next broker index:" + (i + 1) % size);
                     if (consumer != null) {
                         consumer.close();
@@ -158,11 +188,9 @@ public class KafkaConsumer {
     }
 
     public long getOffset(String topic, int partition, long startOffsetTime) {
-        if (consumer == null) {
-            consumer = findLeaderConsumer(partition);
-        }
+        SimpleConsumer simpleConsumer = findLeaderConsumer(partition);
 
-        if (consumer == null) {
+        if (simpleConsumer == null) {
             LOG.error("Error consumer is null get offset from partition:" + partition);
             return -1;
         }
@@ -170,16 +198,15 @@ public class KafkaConsumer {
         TopicAndPartition topicAndPartition = new TopicAndPartition(topic, partition);
         Map<TopicAndPartition, PartitionOffsetRequestInfo> requestInfo = new HashMap<TopicAndPartition, PartitionOffsetRequestInfo>();
         requestInfo.put(topicAndPartition, new PartitionOffsetRequestInfo(startOffsetTime, 1));
-        OffsetRequest request = new OffsetRequest(requestInfo, kafka.api.OffsetRequest.CurrentVersion(), consumer.clientId());
+        OffsetRequest request = new OffsetRequest(requestInfo, kafka.api.OffsetRequest.CurrentVersion(), simpleConsumer.clientId());
 
-        long[] offsets = consumer.getOffsetsBefore(request).offsets(topic, partition);
+        long[] offsets = simpleConsumer.getOffsetsBefore(request).offsets(topic, partition);
         if (offsets.length > 0) {
             return offsets[0];
         } else {
             return NO_OFFSET;
         }
     }
-
 
     public void close() {
         if (consumer != null) {
