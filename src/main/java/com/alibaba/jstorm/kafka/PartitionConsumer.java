@@ -1,12 +1,13 @@
 package com.alibaba.jstorm.kafka;
 
-
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
@@ -18,17 +19,14 @@ import com.google.common.collect.ImmutableMap;
 import kafka.javaapi.message.ByteBufferMessageSet;
 import kafka.message.Message;
 import kafka.message.MessageAndOffset;
-import backtype.storm.Config;
-import backtype.storm.spout.SpoutOutputCollector;
-import backtype.storm.utils.Utils;
 
 /**
- * 
+ *
  * @author feilaoda
  *
  */
 public class PartitionConsumer {
-    private static Logger LOG = LoggerFactory.getLogger(PartitionConsumer.class);
+    private static Logger logger = LoggerFactory.getLogger(PartitionConsumer.class);
 
     static enum EmitState {
         EMIT_MORE, EMIT_END, EMIT_NONE
@@ -36,15 +34,14 @@ public class PartitionConsumer {
 
     private int partition;
     private KafkaConsumer consumer;
-   
 
     private PartitionCoordinator coordinator;
 
     private KafkaSpoutConfig config;
-    private LinkedList<MessageAndOffset> emittingMessages = new LinkedList<MessageAndOffset>();
+    private LinkedList<MessageAndOffset> emittedMessages = new LinkedList<MessageAndOffset>();
     private SortedSet<Long> pendingOffsets = new TreeSet<Long>();
     private SortedSet<Long> failedOffsets = new TreeSet<Long>();
-    private long emittingOffset;
+    private long emittedOffset;
     private long lastCommittedOffset;
     private ZkState zkState;
     private Map stormConf;
@@ -64,98 +61,110 @@ public class PartitionConsumer {
                 jsonOffset = (Long) json.get("offset");
             }
         } catch (Throwable e) {
-            LOG.warn("Error reading and/or parsing at ZkNode: " + zkPath(), e);
+            logger.warn("Error reading and/or parsing at ZkNode: " + zkPath(), e);
         }
 
         try {
             if (config.fromBeginning) {
-                emittingOffset = consumer.getOffset(config.topic, partition, kafka.api.OffsetRequest.EarliestTime());
-            } else {
+                emittedOffset = consumer.getOffset(config.topic, partition, kafka.api.OffsetRequest.EarliestTime());
+            } else if(config.startOffsetTime == -1){
+                emittedOffset = consumer.getOffset(config.topic, partition, kafka.api.OffsetRequest.LatestTime());
+            } else
+            {
                 if (jsonOffset == null) {
                     lastCommittedOffset = consumer.getOffset(config.topic, partition, kafka.api.OffsetRequest.LatestTime());
                 } else {
                     lastCommittedOffset = jsonOffset;
                 }
-                emittingOffset = lastCommittedOffset;
+                emittedOffset = lastCommittedOffset;
             }
         } catch (Exception e) {
-            LOG.error(e.getMessage(), e);
+            logger.error(e.getMessage(), e);
         }
+        logger.info("start consume from offset {}", emittedOffset);
     }
 
-    public EmitState emit(SpoutOutputCollector collector) {
-        if (emittingMessages.isEmpty()) {
-            fillMessages();
-        }
-
+    public EmitState emit(KafkaOutCollector collector) {
         int count = 0;
-        while (true) {
-            MessageAndOffset toEmitMsg = emittingMessages.pollFirst();
-            if (toEmitMsg == null) {
-                return EmitState.EMIT_END;
-            }
-            count ++;
-            Iterable<List<Object>> tups = generateTuples(toEmitMsg.message());
-
-            if (tups != null) {
-                for (List<Object> tuple : tups) {
-                    LOG.debug("emit message {}", new String(Utils.toByteArray(toEmitMsg.message().payload())));
-                    collector.emit(tuple, new KafkaMessageId(partition, toEmitMsg.offset()));
+        try {
+            if (emittedMessages.isEmpty()) {
+                boolean filled = fillMessages();
+                if(!filled) {
+                    return EmitState.EMIT_END;
                 }
-                if(count>=config.batchSendCount) {
+            }
+
+            List<Object> bytesList = new ArrayList<Object>();
+            while (true) {
+                MessageAndOffset toEmitMsg = emittedMessages.pollFirst();
+                if (toEmitMsg == null) {
                     break;
                 }
-            } else {
-                ack(toEmitMsg.offset());
+                bytesList.add(toByteArray(toEmitMsg.message().payload()));
+                count++;
+                if (count >= config.sendBatchCount) {
+                    break;
+                }
             }
+            collector.emit(bytesList, new KafkaMessageId(partition, 0));
+        } catch (Exception e) {
+            logger.error(e.getMessage(), e);
+        } finally {
+            collector.commit();
         }
-
-        if (emittingMessages.isEmpty()) {
+        if (emittedMessages.isEmpty() && count == 0) {
             return EmitState.EMIT_END;
         } else {
             return EmitState.EMIT_MORE;
         }
     }
 
-    private void fillMessages() {
+    private boolean fillMessages() {
 
         ByteBufferMessageSet msgs;
         try {
             long start = System.currentTimeMillis();
-            msgs = consumer.fetchMessages(partition, emittingOffset + 1);
-            
+            long startOffset = emittedOffset;
+            msgs = consumer.fetchMessages(partition, emittedOffset);
+
             if (msgs == null) {
-                LOG.error("fetch null message from offset {}", emittingOffset);
-                return;
+                logger.info("fetch null message from offset {}", emittedOffset);
+                return false;
             }
-            
+
             int count = 0;
             for (MessageAndOffset msg : msgs) {
                 count += 1;
-                emittingMessages.add(msg);
-                emittingOffset = msg.offset();
-                pendingOffsets.add(emittingOffset);
-                LOG.debug("fillmessage fetched a message:{}, offset:{}", msg.message().toString(), msg.offset());
+                pendingOffsets.add(emittedOffset);
+                emittedMessages.add(msg);
+                emittedOffset = msg.nextOffset();
+
+//                logger.debug("fillmessage fetched a message:{}, offset:{}", msg.message().toString(), msg.offset());
             }
             long end = System.currentTimeMillis();
-            LOG.info("fetch message from partition:"+partition+", offset:" + emittingOffset+", size:"+msgs.sizeInBytes()+", count:"+count +", time:"+(end-start));
+            logger.info("fetch message from partition:" + partition + ", start offset:"+startOffset+", latest offset:" + emittedOffset + ", size:" + msgs.sizeInBytes() + ", count:" + count
+                    + ", time:" + (end - start));
         } catch (Exception e) {
-            e.printStackTrace();
-            LOG.error(e.getMessage(),e);
+            logger.error(e.getMessage(), e);
+            return false;
         }
+        return true;
     }
 
     public void commitState() {
         try {
-            long lastOffset = 0;
-            if (pendingOffsets.isEmpty() || pendingOffsets.size() <= 0) {
-                lastOffset = emittingOffset;
-            } else {
-                lastOffset = pendingOffsets.first();
+            if(!failedOffsets.isEmpty()) {
+                long offset = failedOffsets.first();
+                if (emittedOffset > offset) {
+                    emittedOffset = offset;
+                    pendingOffsets.tailSet(offset).clear();
+                }
+                failedOffsets.tailSet(offset).clear();
             }
+            long lastOffset = lastCompletedOffset();
             if (lastOffset != lastCommittedOffset) {
                 Map<Object, Object> data = new HashMap<Object, Object>();
-                data.put("topology", stormConf.get(Config.TOPOLOGY_NAME));
+                data.put("topology", stormConf.get("topology"));
                 data.put("offset", lastOffset);
                 data.put("partition", partition);
                 data.put("broker", ImmutableMap.of("host", consumer.getLeaderBroker().host(), "port", consumer.getLeaderBroker().port()));
@@ -163,22 +172,37 @@ public class PartitionConsumer {
                 zkState.writeJSON(zkPath(), data);
                 lastCommittedOffset = lastOffset;
             }
+
         } catch (Exception e) {
-            LOG.error(e.getMessage(), e);
+            logger.error(e.getMessage(), e);
         }
 
+    }
+
+    public long lastCompletedOffset() {
+        long lastOffset = 0;
+        if (pendingOffsets.isEmpty()) {
+            lastOffset = emittedOffset;
+        } else {
+            try {
+                lastOffset = pendingOffsets.first();
+            } catch (NoSuchElementException e) {
+                lastOffset = emittedOffset;
+            }
+        }
+        return lastOffset;
     }
 
     public void ack(long offset) {
         try {
             pendingOffsets.remove(offset);
         } catch (Exception e) {
-            LOG.error("offset ack error " + offset);
+            logger.error("offset ack error " + offset);
         }
     }
 
     public void fail(long offset) {
-        failedOffsets.remove(offset);
+        failedOffsets.add(offset);
     }
 
     public void close() {
@@ -193,8 +217,22 @@ public class PartitionConsumer {
         if (payload == null) {
             return null;
         }
-        tups = Arrays.asList(Utils.tuple(Utils.toByteArray(payload)));
+        tups = Arrays.asList(toTuple(toByteArray(payload)));
         return tups;
+    }
+
+    public static List<Object> toTuple(Object... values) {
+        List<Object> ret = new ArrayList<Object>();
+        for (Object v : values) {
+            ret.add(v);
+        }
+        return ret;
+    }
+
+    public static byte[] toByteArray(ByteBuffer buffer) {
+        byte[] ret = new byte[buffer.remaining()];
+        buffer.get(ret, 0, ret.length);
+        return ret;
     }
 
     private String zkPath() {

@@ -28,7 +28,7 @@ import kafka.javaapi.consumer.SimpleConsumer;
 import kafka.javaapi.message.ByteBufferMessageSet;
 
 /**
- * 
+ *
  * @author feilaoda
  *
  */
@@ -86,12 +86,16 @@ public class KafkaConsumer {
             if (code == ErrorMapping.OffsetOutOfRangeCode() && config.resetOffsetIfOutOfRange) {
                 long startOffset = getOffset(topic, partition, config.startOffsetTime);
                 offset = startOffset;
-            }
-            if(leaderBroker != null) {
-                LOG.error("fetch data from kafka topic[" + config.topic + "] host[" + leaderBroker.host() + ":" + leaderBroker.port() + "] partition["
-                    + partition + "] error:" + code);
             }else {
-                
+                if (leaderBroker != null) {
+                    LOG.info("WARNING: fetch data error from kafka topic[" + config.topic + "] host[" + leaderBroker.host() + ":" + leaderBroker.port()
+                            + "] partition[" + partition + "] error:" + code);
+                }
+
+                if(code == ErrorMapping.NotLeaderForPartitionCode()) {
+                    this.consumer = null;
+                }
+
             }
             return null;
         } else {
@@ -105,7 +109,7 @@ public class KafkaConsumer {
             if (consumer != null) {
                 return consumer;
             }
-            PartitionMetadata metadata = findLeader(partition);
+            PartitionMetadata metadata = findPartitionMeta(partition);
             if (metadata == null) {
                 leaderBroker = null;
                 consumer = null;
@@ -122,21 +126,10 @@ public class KafkaConsumer {
         return null;
     }
 
-    protected PartitionMetadata findLeader(int partition) {
+    protected PartitionMetadata findPartitionMeta(int partition) {
         PartitionMetadata returnMetaData = null;
         int errors = 0;
         int size = brokerList.size();
-
-        Host brokerHost = brokerList.get(brokerIndex);
-        try {
-            if (consumer == null) {
-                consumer = new SimpleConsumer(brokerHost.getHost(), brokerHost.getPort(), config.socketTimeoutMs, config.socketReceiveBufferBytes,
-                        config.clientId);
-            }
-        } catch (Exception e) {
-            LOG.warn(e.getMessage(), e);
-            consumer = null;
-        }
         int i = brokerIndex;
         loop: while (i < size && errors < size + 1) {
             Host host = brokerList.get(i);
@@ -144,10 +137,8 @@ public class KafkaConsumer {
             brokerIndex = i; // next index
             try {
 
-                if (consumer == null) {
-                    consumer = new SimpleConsumer(host.getHost(), host.getPort(), config.socketTimeoutMs, config.socketReceiveBufferBytes,
+                consumer = new SimpleConsumer(host.getHost(), host.getPort(), config.socketTimeoutMs, config.socketReceiveBufferBytes,
                             config.clientId);
-                }
                 List<String> topics = Collections.singletonList(config.topic);
                 TopicMetadataRequest req = new TopicMetadataRequest(topics);
                 kafka.javaapi.TopicMetadataResponse resp = null;
@@ -156,7 +147,7 @@ public class KafkaConsumer {
                 } catch (Exception e) {
                     errors += 1;
 
-                    LOG.error("findLeader error, broker:" + host.toString() + ", will change to next broker index:" + (i + 1) % size);
+                    LOG.error("findLeader error, broker:" + host.toString() + ", will change to next broker index:" + brokerIndex);
                     if (consumer != null) {
                         consumer.close();
                         consumer = null;
